@@ -1,0 +1,864 @@
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { ArrowLeft, Save, Package, Trash2, Image, ExternalLink, Plus, Send, User, X, ChevronDown, ChevronUp } from 'lucide-react';
+import { productsService } from '@/lib/products';
+import { adminProductService, WPMediaItem, adminTermService } from '@/lib/admin-api';
+import type { WCProductVariationCreate } from '@/lib/types';
+import { generateSlug, getMediaUrl } from '@/lib/utils';
+import { SuccessModal, ErrorModal } from '@/components/admin/Modals';
+import RichTextEditor from '@/components/admin/RichTextEditor';
+import { MediaPickerModal } from '@/components/admin/MediaPickerModal';
+import TermSelector from '@/components/admin/TermSelector';
+
+interface VariationDraft {
+    _key: string;
+    attributeName: string;
+    attributeOption: string;
+    regular_price: string;
+    sale_price: string;
+    sku: string;
+    stock_quantity: string;
+    status: string;
+}
+
+const newVariationDraft = (): VariationDraft => ({
+    _key: Math.random().toString(36).slice(2),
+    attributeName: '',
+    attributeOption: '',
+    regular_price: '',
+    sale_price: '',
+    sku: '',
+    stock_quantity: '',
+    status: 'publish',
+});
+
+export default function AddProductPage() {
+    const router = useRouter();
+    const [loading, setLoading] = useState(false);
+    const [successModal, setSuccessModal] = useState(false);
+    const [errorModal, setErrorModal] = useState<{ isOpen: boolean, message: string }>({ isOpen: false, message: '' });
+
+    // Media State
+    const [featuredImage, setFeaturedImage] = useState<WPMediaItem | null>(null);
+    const [galleryImages, setGalleryImages] = useState<WPMediaItem[]>([]);
+    const [showMediaModal, setShowMediaModal] = useState(false);
+    const [mediaModalMode, setMediaModalMode] = useState<'featured' | 'gallery'>('featured');
+
+    const [formData, setFormData] = useState({
+        name: '',
+        slug: '',
+        type: 'simple' as 'simple' | 'variable' | 'grouped' | 'external',
+        price: '',
+        sale_price: '',
+        short_description: '',
+        description: '',
+        sku: '',
+        stock_quantity: '',
+        status: 'draft',
+        virtual: false,
+        downloadable: false,
+        seller_payment_link: '',
+        whop_payment_link: '',
+        signal_link: '',
+        telegram_link: '',
+        vip_group: '',
+    });
+
+    // Addons State
+    const [addons, setAddons] = useState<{ name: string; type: string; required: boolean }[]>([]);
+
+    // Terms State
+    const [selectedCategories, setSelectedCategories] = useState<number[]>([]);
+    const [selectedTags, setSelectedTags] = useState<number[]>([]);
+
+    // Variation State
+    const [variations, setVariations] = useState<VariationDraft[]>([]);
+    const [expandedVariation, setExpandedVariation] = useState<string | null>(null);
+    const [createdProductId, setCreatedProductId] = useState<number | null>(null);
+
+    const handleChange = (field: string, value: any) => {
+        setFormData(prev => {
+            const updates: any = { [field]: value };
+            if (field === 'name') {
+                updates.slug = generateSlug(value);
+            }
+            return { ...prev, ...updates };
+        });
+    };
+
+    const openMediaModal = (mode: 'featured' | 'gallery') => {
+        setMediaModalMode(mode);
+        setShowMediaModal(true);
+    };
+
+    const handleMediaSelect = (media: WPMediaItem) => {
+        if (mediaModalMode === 'featured') {
+            setFeaturedImage(media);
+        } else {
+            if (!galleryImages.find(img => img.id === media.id)) {
+                setGalleryImages([...galleryImages, media]);
+            }
+        }
+        setShowMediaModal(false);
+    };
+
+    const handleRemoveGalleryImage = (id: number) => {
+        setGalleryImages(galleryImages.filter(img => img.id !== id));
+    };
+
+    // Variation handlers
+    const addVariation = () => {
+        const draft = newVariationDraft();
+        setVariations([...variations, draft]);
+        setExpandedVariation(draft._key);
+    };
+
+    const updateVariation = (key: string, field: keyof VariationDraft, value: string) => {
+        setVariations(prev => prev.map(v => v._key === key ? { ...v, [field]: value } : v));
+    };
+
+    const removeVariation = (key: string) => {
+        setVariations(prev => prev.filter(v => v._key !== key));
+    };
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!formData.name.trim()) return;
+
+        setLoading(true);
+        try {
+            const product = await productsService.createProduct({
+                name: formData.name,
+                slug: formData.slug || undefined,
+                type: formData.type,
+                price: formData.price ? parseFloat(formData.price) : undefined,
+                sale_price: formData.sale_price ? parseFloat(formData.sale_price) : undefined,
+                description: formData.description || undefined,
+                short_description: formData.short_description || undefined,
+                sku: formData.sku || undefined,
+                stock_quantity: formData.stock_quantity ? parseInt(formData.stock_quantity) : undefined,
+                status: formData.status,
+                virtual: formData.virtual,
+                downloadable: formData.downloadable,
+                whop_payment_link: formData.whop_payment_link || undefined,
+                seller_payment_link: formData.seller_payment_link || undefined,
+                telegram_link: formData.telegram_link || undefined,
+                signal_link: formData.signal_link || undefined,
+                vip_group: formData.vip_group || undefined,
+                addons: addons.length > 0 ? addons.map((a, i) => ({
+                    name: a.name,
+                    type: a.type,
+                    required: a.required,
+                    description: '',
+                    position: i,
+                    options: []
+                })) : undefined,
+            });
+
+            setCreatedProductId(product.id);
+
+            // Update Featured Image
+            if (featuredImage) {
+                await adminProductService.updateFeaturedImage(product.id, featuredImage.id);
+            }
+
+            // Update Gallery
+            if (galleryImages.length > 0) {
+                await adminProductService.updateGallery(product.id, galleryImages.map(img => img.id));
+            }
+
+            // Assign Terms
+            const termIds = [...selectedCategories, ...selectedTags];
+            if (termIds.length > 0) {
+                await adminTermService.assignTerms(product.id, termIds);
+            }
+
+            // Create variations
+            if (formData.type === 'variable' && variations.length > 0) {
+                for (const v of variations) {
+                    if (!v.attributeName || !v.attributeOption) continue;
+                    const variationData: WCProductVariationCreate = {
+                        regular_price: v.regular_price || undefined,
+                        sale_price: v.sale_price || undefined,
+                        sku: v.sku || undefined,
+                        stock_quantity: v.stock_quantity ? parseInt(v.stock_quantity) : undefined,
+                        status: v.status || 'publish',
+                        attributes: [{ name: v.attributeName.toLowerCase(), option: v.attributeOption.toLowerCase().replace(/\s+/g, '-') }],
+                    };
+                    await adminProductService.createVariation(product.id, variationData);
+                }
+            }
+
+            setSuccessModal(true);
+        } catch (error) {
+            console.error('Failed to create product:', error);
+            setErrorModal({ isOpen: true, message: 'Failed to create product. Please try again.' });
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="space-y-6">
+            {/* Header */}
+            <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                    <Link
+                        href="/admin/products"
+                        className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
+                    >
+                        <ArrowLeft className="w-5 h-5" />
+                    </Link>
+                    <div>
+                        <h1 className="text-2xl font-bold text-white">Add New Product</h1>
+                        <p className="text-sm text-gray-400 mt-1">Create a new WooCommerce product</p>
+                    </div>
+                </div>
+                <button
+                    onClick={handleSubmit}
+                    disabled={loading || !formData.name.trim()}
+                    className="flex items-center gap-2 px-5 py-2.5 bg-[#d946ef] hover:bg-[#c026d3] text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-purple-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    <Save className="w-4 h-4" />
+                    {loading ? 'Creating...' : 'Create Product'}
+                </button>
+            </div>
+
+            {/* Form */}
+            <form onSubmit={handleSubmit} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Main Content */}
+                <div className="lg:col-span-2 space-y-6">
+                    {/* Basic Info */}
+                    <div className="bg-[#111827] border border-gray-800 rounded-xl p-6 space-y-6">
+                        <div className="flex items-center gap-3 pb-4 border-b border-gray-800">
+                            <div className="w-10 h-10 rounded-lg bg-purple-500/20 text-purple-500 flex items-center justify-center">
+                                <Package className="w-5 h-5" />
+                            </div>
+                            <h3 className="text-white font-semibold">Product Information</h3>
+                        </div>
+
+                        <div className="space-y-4">
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-gray-400">Product Name *</label>
+                                <input
+                                    type="text"
+                                    className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent placeholder-gray-600"
+                                    placeholder="Enter product name"
+                                    value={formData.name}
+                                    onChange={(e) => handleChange('name', e.target.value)}
+                                    required
+                                />
+                            </div>
+
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-gray-400">Slug</label>
+                                <input
+                                    type="text"
+                                    className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent placeholder-gray-600"
+                                    placeholder="product-slug-url"
+                                    value={formData.slug}
+                                    onChange={(e) => handleChange('slug', e.target.value)}
+                                />
+                                <p className="text-xs text-gray-500">The &quot;slug&quot; is the URL-friendly version of the name.</p>
+                            </div>
+
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-gray-400">Short Description</label>
+                                <textarea
+                                    className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent placeholder-gray-600 resize-none"
+                                    placeholder="Brief product description"
+                                    rows={2}
+                                    value={formData.short_description}
+                                    onChange={(e) => handleChange('short_description', e.target.value)}
+                                />
+                            </div>
+
+                            <div className="space-y-2">
+                                <RichTextEditor
+                                    label="Full Description"
+                                    value={formData.description}
+                                    onChange={(val) => handleChange('description', val)}
+                                    placeholder="Detailed product description..."
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Pricing — only show for simple products */}
+                    {formData.type !== 'variable' && (
+                        <div className="bg-[#111827] border border-gray-800 rounded-xl p-6 space-y-4">
+                            <h3 className="text-white font-semibold pb-4 border-b border-gray-800">Pricing</h3>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium text-gray-400">Regular Price ($)</label>
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        min="0"
+                                        className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent placeholder-gray-600"
+                                        placeholder="0.00"
+                                        value={formData.price}
+                                        onChange={(e) => handleChange('price', e.target.value)}
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium text-gray-400">Sale Price ($)</label>
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        min="0"
+                                        className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent placeholder-gray-600"
+                                        placeholder="0.00"
+                                        value={formData.sale_price}
+                                        onChange={(e) => handleChange('sale_price', e.target.value)}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Variations — only show for variable products */}
+                    {formData.type === 'variable' && (
+                        <div className="bg-[#111827] border border-gray-800 rounded-xl p-6 space-y-4">
+                            <div className="flex items-center justify-between pb-4 border-b border-gray-800">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 rounded-lg bg-orange-500/20 text-orange-400 flex items-center justify-center">
+                                        <Package className="w-5 h-5" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-white font-semibold">Variations</h3>
+                                        <p className="text-xs text-gray-500 mt-0.5">Define product options like duration, size, etc.</p>
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={addVariation}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 rounded-lg text-xs font-medium transition-colors border border-orange-500/20"
+                                >
+                                    <Plus className="w-3.5 h-3.5" />
+                                    Add Variation
+                                </button>
+                            </div>
+
+                            {variations.length === 0 ? (
+                                <div className="text-center py-8">
+                                    <Package className="w-10 h-10 text-gray-600 mx-auto mb-3" />
+                                    <p className="text-gray-500 text-sm">No variations yet.</p>
+                                    <p className="text-gray-600 text-xs mt-1">Click &quot;Add Variation&quot; to create product options (e.g. 1 Month, Lifetime).</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {variations.map((v, idx) => (
+                                        <div key={v._key} className="border border-gray-700 rounded-lg overflow-hidden">
+                                            {/* Variation header */}
+                                            <div
+                                                className="flex items-center justify-between px-4 py-3 bg-[#1F2937]/50 cursor-pointer hover:bg-[#1F2937] transition-colors"
+                                                onClick={() => setExpandedVariation(expandedVariation === v._key ? null : v._key)}
+                                            >
+                                                <div className="flex items-center gap-3">
+                                                    <span className="text-xs text-gray-500 font-mono">#{idx + 1}</span>
+                                                    <span className="text-sm text-white font-medium">
+                                                        {v.attributeName && v.attributeOption
+                                                            ? `${v.attributeName}: ${v.attributeOption}`
+                                                            : 'New Variation'}
+                                                    </span>
+                                                    {v.regular_price && (
+                                                        <span className="text-xs text-green-400 font-medium">${v.regular_price}</span>
+                                                    )}
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => { e.stopPropagation(); removeVariation(v._key); }}
+                                                        className="p-1 text-gray-500 hover:text-red-400 transition-colors"
+                                                    >
+                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                    </button>
+                                                    {expandedVariation === v._key
+                                                        ? <ChevronUp className="w-4 h-4 text-gray-500" />
+                                                        : <ChevronDown className="w-4 h-4 text-gray-500" />
+                                                    }
+                                                </div>
+                                            </div>
+
+                                            {/* Variation body */}
+                                            {expandedVariation === v._key && (
+                                                <div className="p-4 space-y-4 border-t border-gray-700">
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-xs font-medium text-gray-400">Attribute Name *</label>
+                                                            <input
+                                                                type="text"
+                                                                className="w-full bg-[#0D1117] text-white text-sm rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-orange-500 border border-gray-700 placeholder-gray-600"
+                                                                placeholder="e.g. Duration"
+                                                                value={v.attributeName}
+                                                                onChange={(e) => updateVariation(v._key, 'attributeName', e.target.value)}
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-xs font-medium text-gray-400">Option Value *</label>
+                                                            <input
+                                                                type="text"
+                                                                className="w-full bg-[#0D1117] text-white text-sm rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-orange-500 border border-gray-700 placeholder-gray-600"
+                                                                placeholder="e.g. 1 Month"
+                                                                value={v.attributeOption}
+                                                                onChange={(e) => updateVariation(v._key, 'attributeOption', e.target.value)}
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-xs font-medium text-gray-400">Regular Price ($)</label>
+                                                            <input
+                                                                type="number"
+                                                                step="0.01"
+                                                                min="0"
+                                                                className="w-full bg-[#0D1117] text-white text-sm rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-orange-500 border border-gray-700 placeholder-gray-600"
+                                                                placeholder="0.00"
+                                                                value={v.regular_price}
+                                                                onChange={(e) => updateVariation(v._key, 'regular_price', e.target.value)}
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-xs font-medium text-gray-400">Sale Price ($)</label>
+                                                            <input
+                                                                type="number"
+                                                                step="0.01"
+                                                                min="0"
+                                                                className="w-full bg-[#0D1117] text-white text-sm rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-orange-500 border border-gray-700 placeholder-gray-600"
+                                                                placeholder="0.00"
+                                                                value={v.sale_price}
+                                                                onChange={(e) => updateVariation(v._key, 'sale_price', e.target.value)}
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                    <div className="grid grid-cols-3 gap-4">
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-xs font-medium text-gray-400">SKU</label>
+                                                            <input
+                                                                type="text"
+                                                                className="w-full bg-[#0D1117] text-white text-sm rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-orange-500 border border-gray-700 placeholder-gray-600"
+                                                                placeholder="Optional SKU"
+                                                                value={v.sku}
+                                                                onChange={(e) => updateVariation(v._key, 'sku', e.target.value)}
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-xs font-medium text-gray-400">Stock Qty</label>
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                className="w-full bg-[#0D1117] text-white text-sm rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-orange-500 border border-gray-700 placeholder-gray-600"
+                                                                placeholder="∞"
+                                                                value={v.stock_quantity}
+                                                                onChange={(e) => updateVariation(v._key, 'stock_quantity', e.target.value)}
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-xs font-medium text-gray-400">Status</label>
+                                                            <select
+                                                                className="w-full bg-[#0D1117] text-white text-sm rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-orange-500 border border-gray-700"
+                                                                value={v.status}
+                                                                onChange={(e) => updateVariation(v._key, 'status', e.target.value)}
+                                                            >
+                                                                <option value="publish">Publish</option>
+                                                                <option value="draft">Draft</option>
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            {formData.type === 'variable' && (
+                                <p className="text-xs text-gray-500 mt-2">
+                                    💡 Each variation represents a selectable option (e.g. &quot;Duration: 1 Month&quot; at $49.99, &quot;Duration: Lifetime&quot; at $299.99).
+                                </p>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Product Access Links — only shown for virtual/downloadable products */}
+                    {(formData.virtual || formData.downloadable) && (
+                        <div className="bg-[#111827] border border-blue-500/20 rounded-xl p-6 space-y-4">
+                            <div className="flex items-center gap-3 pb-4 border-b border-white/[0.06]">
+                                <div className="w-10 h-10 rounded-lg bg-blue-500/10 text-blue-400 flex items-center justify-center ring-1 ring-blue-500/20">
+                                    <Send className="w-5 h-5" />
+                                </div>
+                                <div>
+                                    <h3 className="text-white font-semibold">Product Access Links</h3>
+                                    <p className="text-xs text-gray-500">Shown to the customer after their order is completed</p>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium text-gray-400">Telegram Invite Link</label>
+                                    <input
+                                        type="url"
+                                        className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-blue-500 border border-transparent"
+                                        placeholder="https://t.me/joinchat/..."
+                                        value={formData.telegram_link}
+                                        onChange={(e) => handleChange('telegram_link', e.target.value)}
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium text-gray-400">Signal Access Link</label>
+                                    <input
+                                        type="url"
+                                        className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-blue-500 border border-transparent"
+                                        placeholder="https://signal.group/..."
+                                        value={formData.signal_link}
+                                        onChange={(e) => handleChange('signal_link', e.target.value)}
+                                    />
+                                </div>
+                                <div className="space-y-2 md:col-span-2">
+                                    <label className="text-sm font-medium text-gray-400">VIP Group Name / Info</label>
+                                    <input
+                                        type="text"
+                                        className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-blue-500 border border-transparent"
+                                        placeholder="e.g. Diamond VIP Signal Group"
+                                        value={formData.vip_group}
+                                        onChange={(e) => handleChange('vip_group', e.target.value)}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Payment Links — always visible */}
+                    <div className="bg-[#111827] border border-gray-800 rounded-xl p-6 space-y-4">
+                        <div className="flex items-center gap-3 pb-4 border-b border-gray-800">
+                            <div className="w-10 h-10 rounded-lg bg-purple-500/20 text-purple-400 flex items-center justify-center">
+                                <ExternalLink className="w-5 h-5" />
+                            </div>
+                            <div>
+                                <h3 className="text-white font-semibold">Payment Links</h3>
+                                <p className="text-xs text-gray-500">External checkout links for this product</p>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-gray-400">Seller Payment Link (Selar)</label>
+                                <input
+                                    type="url"
+                                    className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent placeholder-gray-600"
+                                    placeholder="https://selar.co/..."
+                                    value={formData.seller_payment_link}
+                                    onChange={(e) => handleChange('seller_payment_link', e.target.value)}
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-gray-400">Whop Checkout Link</label>
+                                <input
+                                    type="url"
+                                    className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent placeholder-gray-600"
+                                    placeholder="https://whop.com/checkout/..."
+                                    value={formData.whop_payment_link}
+                                    onChange={(e) => handleChange('whop_payment_link', e.target.value)}
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Custom Input Fields (Addons) */}
+                    <div className="bg-[#111827] border border-gray-800 rounded-xl p-6 space-y-4">
+                        <div className="flex items-center justify-between pb-4 border-b border-gray-800">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-lg bg-pink-500/20 text-pink-500 flex items-center justify-center">
+                                    <User className="w-5 h-5" />
+                                </div>
+                                <h3 className="text-white font-semibold">Custom Input Fields (Addons)</h3>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setAddons([...addons, { name: 'Telegram Username', type: 'text', required: true }])}
+                                className="flex items-center gap-1 text-xs text-pink-500 hover:text-pink-400 font-medium"
+                            >
+                                <Plus className="w-3.5 h-3.5" />
+                                Add Field
+                            </button>
+                        </div>
+
+                        {addons.length === 0 ? (
+                            <div className="text-center py-6 border border-dashed border-gray-800 rounded-lg">
+                                <p className="text-gray-500 text-xs text-center px-4 italic">No custom fields defined. Use this to collect extra info like Telegram usernames during checkout.</p>
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                {addons.map((addon, idx) => (
+                                    <div key={idx} className="flex flex-wrap md:flex-nowrap items-center gap-3 p-3 bg-[#1F2937]/30 rounded-lg border border-gray-800">
+                                        <div className="flex-1 min-w-[150px]">
+                                            <input
+                                                type="text"
+                                                className="w-full bg-[#0D1117] text-white text-xs rounded-lg px-3 py-1.5 outline-none focus:ring-1 focus:ring-pink-500 border border-gray-700"
+                                                placeholder="Field Label (e.g. Telegram Username)"
+                                                value={addon.name}
+                                                onChange={(e) => {
+                                                    const newAddons = [...addons];
+                                                    newAddons[idx].name = e.target.value;
+                                                    setAddons(newAddons);
+                                                }}
+                                            />
+                                        </div>
+                                        <div className="w-full md:w-32">
+                                            <select
+                                                className="w-full bg-[#0D1117] text-white text-xs rounded-lg px-3 py-1.5 outline-none focus:ring-1 focus:ring-pink-500 border border-gray-700"
+                                                value={addon.type}
+                                                onChange={(e) => {
+                                                    const newAddons = [...addons];
+                                                    newAddons[idx].type = e.target.value;
+                                                    setAddons(newAddons);
+                                                }}
+                                            >
+                                                <option value="text">Text Entry</option>
+                                                <option value="email">Email</option>
+                                                <option value="textarea">Multi-line</option>
+                                            </select>
+                                        </div>
+                                        <label className="flex items-center gap-2 cursor-pointer select-none">
+                                            <input
+                                                type="checkbox"
+                                                className="rounded bg-gray-700 border-gray-600 accent-pink-600 w-3.5 h-3.5"
+                                                checked={addon.required}
+                                                onChange={(e) => {
+                                                    const newAddons = [...addons];
+                                                    newAddons[idx].required = e.target.checked;
+                                                    setAddons(newAddons);
+                                                }}
+                                            />
+                                            <span className="text-xs text-gray-400">Required</span>
+                                        </label>
+                                        <button
+                                            type="button"
+                                            onClick={() => setAddons(addons.filter((_, i) => i !== idx))}
+                                            className="p-1.5 text-gray-500 hover:text-red-400 transition-colors"
+                                        >
+                                            <X className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        <p className="text-xs text-gray-500">Collect additional information from the customer at checkout for this specific product.</p>
+                    </div>
+
+                    {/* Inventory */}
+                    <div className="bg-[#111827] border border-gray-800 rounded-xl p-6 space-y-4">
+                        <h3 className="text-white font-semibold pb-4 border-b border-gray-800">Inventory</h3>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-gray-400">SKU</label>
+                                <input
+                                    type="text"
+                                    className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent placeholder-gray-600"
+                                    placeholder="Stock Keeping Unit"
+                                    value={formData.sku}
+                                    onChange={(e) => handleChange('sku', e.target.value)}
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-gray-400">Stock Quantity</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent placeholder-gray-600"
+                                    placeholder="0"
+                                    value={formData.stock_quantity}
+                                    onChange={(e) => handleChange('stock_quantity', e.target.value)}
+                                />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Sidebar */}
+                <div className="space-y-6">
+                    {/* Status */}
+                    <div className="bg-[#111827] border border-gray-800 rounded-xl p-6 space-y-4">
+                        <h3 className="text-white font-semibold pb-4 border-b border-gray-800">Publish</h3>
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium text-gray-400">Status</label>
+                            <select
+                                className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent"
+                                value={formData.status}
+                                onChange={(e) => handleChange('status', e.target.value)}
+                            >
+                                <option value="draft">Draft</option>
+                                <option value="publish">Publish</option>
+                                <option value="pending">Pending Review</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    {/* Featured Image */}
+                    <div className="bg-[#111827] border border-gray-800 rounded-xl p-6 space-y-4">
+                        <h3 className="text-white font-semibold pb-4 border-b border-gray-800">Featured Image</h3>
+                        {featuredImage ? (
+                            <div className="relative group mt-2">
+                                <img
+                                    src={getMediaUrl((featuredImage as any).url || featuredImage.source_url)}
+                                    alt="Featured"
+                                    className="w-full h-auto rounded-lg border border-gray-700"
+                                    referrerPolicy="no-referrer"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setFeaturedImage(null)}
+                                    className="absolute top-2 right-2 bg-red-500 text-white p-1.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
+                                >
+                                    <Trash2 className="w-4 h-4" />
+                                </button>
+                            </div>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={() => openMediaModal('featured')}
+                                className="w-full aspect-video flex flex-col items-center justify-center border-2 border-dashed border-gray-700 rounded-lg hover:border-purple-500 hover:text-purple-500 text-gray-500 transition-colors"
+                            >
+                                <Image className="w-8 h-8 mb-2" />
+                                <span className="text-sm">Set featured image</span>
+                            </button>
+                        )}
+                    </div>
+
+                    {/* Product Gallery */}
+                    <div className="bg-[#111827] border border-gray-800 rounded-xl p-6 space-y-4">
+                        <div className="flex items-center justify-between pb-4 border-b border-gray-800">
+                            <h3 className="text-white font-semibold">Product Gallery</h3>
+                            <button
+                                type="button"
+                                onClick={() => openMediaModal('gallery')}
+                                className="text-xs text-purple-500 hover:text-purple-400 font-medium"
+                            >
+                                Add Images
+                            </button>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                            {galleryImages.map((img) => (
+                                <div key={img.id} className="relative group aspect-square bg-gray-800 rounded-lg overflow-hidden border border-gray-700">
+                                    <img
+                                        src={getMediaUrl((img as any).url || img.source_url)}
+                                        alt="Gallery"
+                                        className="w-full h-full object-cover"
+                                        referrerPolicy="no-referrer"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => handleRemoveGalleryImage(img.id)}
+                                        className="absolute top-1 right-1 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                                    >
+                                        <Trash2 className="w-3 h-3" />
+                                    </button>
+                                </div>
+                            ))}
+                            <button
+                                type="button"
+                                onClick={() => openMediaModal('gallery')}
+                                className="aspect-square flex flex-col items-center justify-center border-2 border-dashed border-gray-700 rounded-lg hover:border-purple-500 hover:text-purple-500 text-gray-500 transition-colors"
+                            >
+                                <Image className="w-6 h-6 mb-1" />
+                                <span className="text-[10px]">Add Image</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Product Type */}
+                    <div className="bg-[#111827] border border-gray-800 rounded-xl p-6 space-y-4">
+                        <h3 className="text-white font-semibold pb-4 border-b border-gray-800">Product Type</h3>
+
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium text-gray-400">Type</label>
+                            <select
+                                className="w-full bg-[#1F2937] text-white text-sm rounded-lg px-4 py-2.5 outline-none focus:ring-1 focus:ring-purple-500 border border-transparent"
+                                value={formData.type}
+                                onChange={(e) => handleChange('type', e.target.value)}
+                            >
+                                <option value="simple">Simple Product</option>
+                                <option value="variable">Variable Product</option>
+                                <option value="grouped">Grouped Product</option>
+                                <option value="external">External/Affiliate Product</option>
+                            </select>
+                        </div>
+
+                        <div className="flex flex-col gap-3 mt-4">
+                            <label className="flex items-center gap-3 cursor-pointer select-none">
+                                <input
+                                    type="checkbox"
+                                    className="rounded bg-gray-700 border-gray-600 accent-purple-600 w-4 h-4"
+                                    checked={formData.virtual}
+                                    onChange={(e) => handleChange('virtual', e.target.checked)}
+                                />
+                                <span className="text-sm text-gray-300">Virtual Product</span>
+                            </label>
+
+                            <label className="flex items-center gap-3 cursor-pointer select-none">
+                                <input
+                                    type="checkbox"
+                                    className="rounded bg-gray-700 border-gray-600 accent-purple-600 w-4 h-4"
+                                    checked={formData.downloadable}
+                                    onChange={(e) => handleChange('downloadable', e.target.checked)}
+                                />
+                                <span className="text-sm text-gray-300">Downloadable</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    {/* Categories */}
+                    <TermSelector
+                        taxonomy="product_cat"
+                        label="Categories"
+                        selectedIds={selectedCategories}
+                        onChange={setSelectedCategories}
+                    />
+
+                    {/* Tags */}
+                    <TermSelector
+                        taxonomy="product_tag"
+                        label="Tags"
+                        selectedIds={selectedTags}
+                        onChange={setSelectedTags}
+                    />
+                </div>
+            </form>
+
+            <MediaPickerModal
+                isOpen={showMediaModal}
+                onClose={() => setShowMediaModal(false)}
+                onSelect={handleMediaSelect}
+                title={mediaModalMode === 'featured' ? 'Select Featured Image' : 'Add to Gallery'}
+            />
+
+            {/* Success Modal */}
+            <SuccessModal
+                isOpen={successModal}
+                onClose={() => setSuccessModal(false)}
+                title="Product Created"
+                message="Your product has been created successfully."
+                confirmText="Continue Editing"
+                onConfirm={() => {
+                    setSuccessModal(false);
+                    if (createdProductId) router.push(`/admin/products/${createdProductId}`);
+                }}
+                secondaryText="Back to Products"
+                onSecondary={() => router.push('/admin/products')}
+            />
+
+            {/* Error Modal */}
+            <ErrorModal
+                isOpen={errorModal.isOpen}
+                onClose={() => setErrorModal({ ...errorModal, isOpen: false })}
+                message={errorModal.message}
+            />
+        </div>
+    );
+}
